@@ -1,5 +1,6 @@
 from flask import Flask, render_template, request, redirect, session, url_for, flash, jsonify
-import mysql.connector
+import psycopg2
+import psycopg2.extras
 from datetime import datetime, time
 
 app = Flask(__name__)
@@ -7,11 +8,11 @@ app.secret_key = 'your_secret_key'
 
 # DB connection
 def get_db_connection():
-    return mysql.connector.connect(
-        host='localhost',
-        user='root',
-        password='2006',
-        database='appointment_db'
+    return psycopg2.connect(
+        host='db.xqcxvklmrqaylouujmox.supabase.co',
+        database='postgres',
+        user='postgres',
+        password='230701216'
     )
 
 # Generate time slots from 9:00 AM to 5:00 PM with 30-minute intervals
@@ -23,7 +24,6 @@ def generate_time_slots():
     for hour in range(start_hour, end_hour):
         for minute in [0, 30]:
             time_obj = time(hour, minute)
-            # Format as 12-hour format with AM/PM
             formatted_time = time_obj.strftime("%I:%M %p")
             slots.append(formatted_time)
     
@@ -45,9 +45,12 @@ def register():
 
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("INSERT INTO users (name, email, password, role) VALUES (%s, %s, %s, %s)",
-                       (name, email, password, role))
+        cursor.execute(
+            "INSERT INTO users (name, email, password, role) VALUES (%s, %s, %s, %s)",
+            (name, email, password, role)
+        )
         conn.commit()
+        cursor.close()
         conn.close()
         return redirect(url_for('login'))
 
@@ -61,9 +64,13 @@ def login():
         password = request.form['password']
 
         conn = get_db_connection()
-        cursor = conn.cursor(dictionary=True)
-        cursor.execute("SELECT * FROM users WHERE email = %s AND password = %s", (email, password))
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cursor.execute(
+            "SELECT * FROM users WHERE email = %s AND password = %s",
+            (email, password)
+        )
         user = cursor.fetchone()
+        cursor.close()
         conn.close()
 
         if user:
@@ -86,7 +93,7 @@ def doctor_dashboard():
         return redirect(url_for('login'))
 
     conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
+    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cursor.execute("""
         SELECT a.*, u.name AS patient_name FROM appointments a 
         JOIN users u ON a.patient_id = u.id 
@@ -94,6 +101,7 @@ def doctor_dashboard():
         ORDER BY a.date ASC, a.time_slot ASC
     """, (session['user_id'],))
     appointments = cursor.fetchall()
+    cursor.close()
     conn.close()
     return render_template('doctor_dashboard.html', name=session['name'], appointments=appointments)
 
@@ -104,7 +112,7 @@ def patient_dashboard():
         return redirect(url_for('login'))
 
     conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
+    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cursor.execute("""
         SELECT a.*, u.name AS doctor_name FROM appointments a 
         JOIN users u ON a.doctor_id = u.id 
@@ -112,6 +120,7 @@ def patient_dashboard():
         ORDER BY a.date ASC, a.time_slot ASC
     """, (session['user_id'],))
     appointments = cursor.fetchall()
+    cursor.close()
     conn.close()
     return render_template('patient_dashboard.html', name=session['name'], appointments=appointments)
 
@@ -126,20 +135,15 @@ def check_availability():
     
     conn = get_db_connection()
     cursor = conn.cursor()
-    
-    # Get booked time slots for the specific doctor and date
     cursor.execute("""
         SELECT time_slot FROM appointments 
         WHERE doctor_id = %s AND date = %s AND status != 'Rejected'
     """, (doctor_id, date))
-    
     booked_slots = [row[0] for row in cursor.fetchall()]
+    cursor.close()
     conn.close()
     
-    # Generate all possible time slots
     all_slots = generate_time_slots()
-    
-    # Filter out booked slots
     available_slots = [slot for slot in all_slots if slot not in booked_slots]
     
     return jsonify({'available_slots': available_slots})
@@ -151,7 +155,7 @@ def book_appointment():
         return redirect(url_for('login'))
 
     conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
+    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cursor.execute("SELECT * FROM users WHERE role='doctor'")
     doctors = cursor.fetchall()
 
@@ -161,30 +165,30 @@ def book_appointment():
         time_slot = request.form['time_slot']
         reason = request.form['reason']
 
-        # Check if the time slot is still available
         cursor.execute("""
             SELECT id FROM appointments 
             WHERE doctor_id = %s AND date = %s AND time_slot = %s AND status != 'Rejected'
         """, (doctor_id, date, time_slot))
-        
         existing_appointment = cursor.fetchone()
         
         if existing_appointment:
             flash('Sorry, this time slot is already booked. Please select another time.', 'error')
+            cursor.close()
             conn.close()
             return render_template('book_appointment.html', doctors=doctors, time_slots=generate_time_slots())
         
-        # Book the appointment
         cursor.execute("""
             INSERT INTO appointments (patient_id, doctor_id, date, time_slot, reason, status) 
             VALUES (%s, %s, %s, %s, %s, %s)
         """, (session['user_id'], doctor_id, date, time_slot, reason, 'Pending'))
         
         conn.commit()
+        cursor.close()
         conn.close()
         flash('Appointment booked successfully!', 'success')
         return redirect(url_for('patient_dashboard'))
 
+    cursor.close()
     conn.close()
     return render_template('book_appointment.html', doctors=doctors, time_slots=generate_time_slots())
 
@@ -196,9 +200,12 @@ def update_status(appointment_id, status):
 
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("UPDATE appointments SET status = %s WHERE id = %s AND doctor_id = %s",
-                   (status, appointment_id, session['user_id']))
+    cursor.execute(
+        "UPDATE appointments SET status = %s WHERE id = %s AND doctor_id = %s",
+        (status, appointment_id, session['user_id'])
+    )
     conn.commit()
+    cursor.close()
     conn.close()
     return redirect(url_for('doctor_dashboard'))
 
@@ -211,13 +218,19 @@ def delete_appointment(appointment_id):
     conn = get_db_connection()
     cursor = conn.cursor()
 
-    # Only delete if user is owner
     if session['role'] == 'patient':
-        cursor.execute("DELETE FROM appointments WHERE id = %s AND patient_id = %s", (appointment_id, session['user_id']))
+        cursor.execute(
+            "DELETE FROM appointments WHERE id = %s AND patient_id = %s",
+            (appointment_id, session['user_id'])
+        )
     elif session['role'] == 'doctor':
-        cursor.execute("DELETE FROM appointments WHERE id = %s AND doctor_id = %s", (appointment_id, session['user_id']))
+        cursor.execute(
+            "DELETE FROM appointments WHERE id = %s AND doctor_id = %s",
+            (appointment_id, session['user_id'])
+        )
 
     conn.commit()
+    cursor.close()
     conn.close()
     return redirect(url_for(session['role'] + '_dashboard'))
 
